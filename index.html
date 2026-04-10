@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flappy Kiro</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      background: #1a1a2e;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+  <script>
+    const CONFIG = {
+      CANVAS_WIDTH: 800,
+      CANVAS_HEIGHT: 600,
+      GHOST_X: 150,
+      GHOST_WIDTH: 40,
+      GHOST_HEIGHT: 40,
+      GRAVITY: 0.5,
+      JUMP_VELOCITY: -9,
+      PIPE_WIDTH: 60,
+      PIPE_GAP: 160,
+      PIPE_SPEED: 3,
+      PIPE_SPAWN_INTERVAL: 1800,
+      PIPE_MIN_HEIGHT: 60,
+      PIPE_MAX_HEIGHT: 320,
+      JETPACK_WIDTH: 40,
+      JETPACK_HEIGHT: 40,
+      JETPACK_SPAWN_INTERVAL: 3,
+      JETPACK_SPAWN_VARIANCE: 2,
+      JETPACK_GLOW_SPEED: 0.05,
+      ACCELERATION_DURATION: 5000,
+      ACCELERATION_SPEED_MULTIPLIER: 2.5,
+      SCORE_MULTIPLIER: 2,
+      BG_COLOR: '#a8d8ea',
+      PIPE_COLOR: '#4caf50',
+      SCORE_BAR_HEIGHT: 40,
+      SCORE_BAR_COLOR: '#2c2c2c',
+      JUMP_SOUND: 'assets/jump.wav',
+      GAME_OVER_SOUND: 'assets/game_over.wav',
+      JETPACK_COLLECT_SOUND: 'assets/jetpack_collect.wav',
+      ACCELERATION_MUSIC: 'assets/acceleration_music.wav',
+      GHOST_IMAGE: 'assets/ghosty.png',
+      JETPACK_IMAGE: 'jetpack.png',
+    };
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const assetLoader = (() => {
+      const images = {};
+      const audios = {};
+
+      function loadAll(onComplete) {
+        const assets = [
+          { type: 'image', key: 'ghost',    src: CONFIG.GHOST_IMAGE },
+          { type: 'image', key: 'jetpack',  src: CONFIG.JETPACK_IMAGE },
+          { type: 'audio', key: 'jump',     src: CONFIG.JUMP_SOUND },
+          { type: 'audio', key: 'gameOver', src: CONFIG.GAME_OVER_SOUND },
+          { type: 'audio', key: 'jetpackCollect', src: CONFIG.JETPACK_COLLECT_SOUND },
+          { type: 'audio', key: 'accelerationMusic', src: CONFIG.ACCELERATION_MUSIC },
+        ];
+
+        let loaded = 0;
+        const total = assets.length;
+
+        function onLoad() {
+          loaded++;
+          if (loaded === total) onComplete();
+        }
+
+        assets.forEach(({ type, key, src }) => {
+          if (type === 'image') {
+            const img = new Image();
+            img.onload = onLoad;
+            img.onerror = onLoad; // still proceed if asset missing
+            img.src = src;
+            images[key] = img;
+          } else {
+            const audio = new Audio();
+            audio.oncanplaythrough = onLoad;
+            audio.onerror = onLoad;
+            audio.src = src;
+            audios[key] = audio;
+          }
+        });
+      }
+
+      function getImage(key) { return images[key]; }
+      function getAudio(key)  { return audios[key]; }
+
+      return { loadAll, getImage, getAudio };
+    })();
+
+    const STATES = {
+      WAITING:   'WAITING',
+      PLAYING:   'PLAYING',
+      GAME_OVER: 'GAME_OVER',
+    };
+
+    const gameState = (() => {
+      let state     = STATES.WAITING;
+      let highScore = 0;
+
+      // Acceleration state
+      let isAccelerating = false;
+      let accelerationTimeLeft = 0;
+
+      // Jetpack statistics
+      let jetpacksCollected = 0;  // Current game
+      let currentStreak = 0;       // Current streak
+      let longestStreak = 0;       // Session record
+      let totalJetpacks = 0;       // Session total
+
+      function reset() {
+        state = STATES.WAITING;
+        isAccelerating = false;
+        accelerationTimeLeft = 0;
+        jetpacksCollected = 0;
+        currentStreak = 0;
+        // Note: longestStreak and totalJetpacks persist across games
+      }
+
+      function setState(s) {
+        state = s;
+      }
+
+      function getState() {
+        return state;
+      }
+
+      function startAcceleration() {
+        isAccelerating = true;
+        accelerationTimeLeft = CONFIG.ACCELERATION_DURATION;
+        jetpacksCollected++;
+        currentStreak++;
+        totalJetpacks++;
+        
+        // Update longest streak if current streak is higher
+        if (currentStreak > longestStreak) {
+          longestStreak = currentStreak;
+        }
+      }
+
+      function updateAcceleration(dt) {
+        if (!isAccelerating) return;
+        
+        // Decrease acceleration time left
+        accelerationTimeLeft -= dt;
+        
+        // When time runs out, end acceleration and reset streak
+        if (accelerationTimeLeft <= 0) {
+          isAccelerating = false;
+          accelerationTimeLeft = 0;
+          currentStreak = 0;
+        }
+      }
+
+      function getScoreMultiplier() {
+        return isAccelerating ? CONFIG.SCORE_MULTIPLIER : 1;
+      }
+
+      function getJetpackStats() {
+        return {
+          collected: jetpacksCollected,
+          longestStreak: longestStreak,
+          totalJetpacks: totalJetpacks
+        };
+      }
+
+      return { 
+        reset, 
+        setState, 
+        getState,
+        startAcceleration,
+        updateAcceleration,
+        getScoreMultiplier,
+        getJetpackStats,
+        get highScore() { return highScore; }, 
+        set highScore(v) { highScore = v; },
+        get isAccelerating() { return isAccelerating; },
+        set isAccelerating(v) { isAccelerating = v; },
+        get accelerationTimeLeft() { return accelerationTimeLeft; },
+        set accelerationTimeLeft(v) { accelerationTimeLeft = v; },
+        get jetpacksCollected() { return jetpacksCollected; },
+        set jetpacksCollected(v) { jetpacksCollected = v; },
+        get currentStreak() { return currentStreak; },
+        set currentStreak(v) { currentStreak = v; },
+        get longestStreak() { return longestStreak; },
+        set longestStreak(v) { longestStreak = v; },
+        get totalJetpacks() { return totalJetpacks; },
+        set totalJetpacks(v) { totalJetpacks = v; }
+      };
+    })();
+
+    const ghost = (() => {
+      const INITIAL_Y = CONFIG.CANVAS_HEIGHT / 2 - CONFIG.GHOST_HEIGHT / 2;
+      let x = CONFIG.GHOST_X;
+      let y = INITIAL_Y;
+      let vy = 0;
+
+      function reset() {
+        x = CONFIG.GHOST_X;
+        y = INITIAL_Y;
+        vy = 0;
+      }
+
+      function jump() {
+        vy = CONFIG.JUMP_VELOCITY;
+      }
+
+      function update() {
+        vy += CONFIG.GRAVITY;
+        y += vy;
+      }
+
+      function getBounds() {
+        return { x, y, width: CONFIG.GHOST_WIDTH, height: CONFIG.GHOST_HEIGHT };
+      }
+
+      function render(ctx) {
+        const img = assetLoader.getImage('ghost');
+        ctx.drawImage(img, x, y, CONFIG.GHOST_WIDTH, CONFIG.GHOST_HEIGHT);
+      }
+
+      return { reset, jump, update, render, getBounds };
+    })();
+
+    const pipeManager = (() => {
+      let pipes = [];
+      let elapsed = 0;
+      let pipesPassedCount = 0;
+
+      function reset() {
+        pipes = [];
+        elapsed = 0;
+        pipesPassedCount = 0;
+      }
+
+      function spawnPipe() {
+        const topHeight = Math.floor(
+          Math.random() * (CONFIG.PIPE_MAX_HEIGHT - CONFIG.PIPE_MIN_HEIGHT + 1) + CONFIG.PIPE_MIN_HEIGHT
+        );
+        pipes.push({
+          x: CONFIG.CANVAS_WIDTH,
+          topHeight,
+          gapY: topHeight,
+          gapHeight: CONFIG.PIPE_GAP,
+          scored: false,
+        });
+      }
+
+      function update(dt, speedMultiplier = 1) {
+        // Move all pipes left with speed multiplier
+        for (const pipe of pipes) {
+          pipe.x -= CONFIG.PIPE_SPEED * speedMultiplier;
+        }
+
+        // Spawn new pipe when interval elapsed
+        elapsed += dt;
+        if (elapsed >= CONFIG.PIPE_SPAWN_INTERVAL) {
+          spawnPipe();
+          elapsed = 0;
+        }
+
+        // Remove off-screen pipes
+        pipes = pipes.filter(pipe => pipe.x + CONFIG.PIPE_WIDTH >= 0);
+      }
+
+      function getPipes() {
+        return pipes;
+      }
+
+      function getPipesPassedCount() {
+        return pipesPassedCount;
+      }
+
+      function incrementPipesPassedCount() {
+        pipesPassedCount++;
+      }
+
+      function render(ctx) {
+        ctx.fillStyle = CONFIG.PIPE_COLOR;
+        const playAreaHeight = CONFIG.CANVAS_HEIGHT - CONFIG.SCORE_BAR_HEIGHT;
+        for (const pipe of pipes) {
+          // Top pipe: from y=0 downward
+          ctx.fillRect(pipe.x, 0, CONFIG.PIPE_WIDTH, pipe.topHeight);
+          // Bottom pipe: from gapY + gapHeight to canvas play area bottom
+          const bottomY = pipe.gapY + pipe.gapHeight;
+          ctx.fillRect(pipe.x, bottomY, CONFIG.PIPE_WIDTH, playAreaHeight - bottomY);
+        }
+      }
+
+      return { reset, spawnPipe, update, getPipes, getPipesPassedCount, incrementPipesPassedCount, render };
+    })();
+
+    // Jetpack Manager
+    const jetpackManager = (() => {
+      let jetpacks = [];
+      let lastSpawnPipeCount = 0;
+      let nextSpawnInterval = CONFIG.JETPACK_SPAWN_INTERVAL + 
+                              Math.floor(Math.random() * CONFIG.JETPACK_SPAWN_VARIANCE);
+
+      function reset() {
+        jetpacks = [];
+        lastSpawnPipeCount = 0;
+        nextSpawnInterval = CONFIG.JETPACK_SPAWN_INTERVAL + 
+                            Math.floor(Math.random() * CONFIG.JETPACK_SPAWN_VARIANCE);
+      }
+
+      function spawnJetpack() {
+        // Spawn at random height, avoiding edges
+        const playAreaHeight = CONFIG.CANVAS_HEIGHT - CONFIG.SCORE_BAR_HEIGHT;
+        const margin = 80; // Avoid spawning too close to top or bottom
+        const minY = margin;
+        const maxY = playAreaHeight - margin - CONFIG.JETPACK_HEIGHT;
+        const y = Math.floor(Math.random() * (maxY - minY + 1)) + minY;
+
+        jetpacks.push({
+          x: CONFIG.CANVAS_WIDTH,
+          y: y,
+          width: CONFIG.JETPACK_WIDTH,
+          height: CONFIG.JETPACK_HEIGHT,
+          glowPhase: 0,
+        });
+      }
+
+      function update(dt, speedMultiplier = 1, pipesPassedCount = 0) {
+        // Move all jetpacks left with speed multiplier
+        for (const jetpack of jetpacks) {
+          jetpack.x -= CONFIG.PIPE_SPEED * speedMultiplier;
+          // Update glow phase for animation
+          jetpack.glowPhase += CONFIG.JETPACK_GLOW_SPEED;
+          if (jetpack.glowPhase > Math.PI * 2) {
+            jetpack.glowPhase -= Math.PI * 2;
+          }
+        }
+
+        // Check if it's time to spawn a new jetpack based on pipes passed
+        if (pipesPassedCount > 0 && 
+            pipesPassedCount >= lastSpawnPipeCount + nextSpawnInterval) {
+          spawnJetpack();
+          lastSpawnPipeCount = pipesPassedCount;
+          // Set next spawn interval with variance
+          nextSpawnInterval = CONFIG.JETPACK_SPAWN_INTERVAL + 
+                              Math.floor(Math.random() * CONFIG.JETPACK_SPAWN_VARIANCE);
+        }
+
+        // Remove off-screen jetpacks
+        jetpacks = jetpacks.filter(jetpack => jetpack.x + jetpack.width >= 0);
+      }
+
+      function getJetpacks() {
+        return jetpacks;
+      }
+
+      function removeJetpack(jetpack) {
+        const index = jetpacks.indexOf(jetpack);
+        if (index > -1) {
+          jetpacks.splice(index, 1);
+        }
+      }
+
+      function render(ctx, time) {
+        const img = assetLoader.getImage('jetpack');
+        
+        for (const jetpack of jetpacks) {
+          // Calculate glow effect using sin wave for pulsing transparency
+          // glowPhase oscillates between 0 and 2π, sin gives -1 to 1
+          // Map to alpha range 0.5 to 1.0 for visible pulsing effect
+          const alpha = 0.75 + Math.sin(jetpack.glowPhase) * 0.25;
+          
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          
+          if (img && img.complete) {
+            ctx.drawImage(img, jetpack.x, jetpack.y, jetpack.width, jetpack.height);
+          } else {
+            // Fallback: draw colored rectangle if image not loaded
+            ctx.fillStyle = '#FFD700'; // Gold color
+            ctx.fillRect(jetpack.x, jetpack.y, jetpack.width, jetpack.height);
+          }
+          
+          ctx.restore();
+        }
+      }
+
+      return { reset, spawnJetpack, update, getJetpacks, removeJetpack, render };
+    })();
+
+    // Collision Detector
+    function rectOverlap(a, b) {
+      return a.x < b.x + b.width &&
+             a.x + a.width > b.x &&
+             a.y < b.y + b.height &&
+             a.y + a.height > b.y;
+    }
+
+    function checkCollision(ghostBounds, pipes, canvasHeight, isInvincible = false) {
+      // Check boundary: above canvas or below play area (always enabled)
+      if (ghostBounds.y < 0 ||
+          ghostBounds.y + ghostBounds.height > canvasHeight - CONFIG.SCORE_BAR_HEIGHT) {
+        return true;
+      }
+
+      // Skip pipe collision check if invincible (during acceleration)
+      if (isInvincible) {
+        return false;
+      }
+
+      // Check overlap with each pipe (top and bottom)
+      for (const pipe of pipes) {
+        const topPipe = {
+          x: pipe.x,
+          y: 0,
+          width: CONFIG.PIPE_WIDTH,
+          height: pipe.topHeight,
+        };
+        const bottomPipe = {
+          x: pipe.x,
+          y: pipe.gapY + pipe.gapHeight,
+          width: CONFIG.PIPE_WIDTH,
+          height: canvasHeight - (pipe.gapY + pipe.gapHeight),
+        };
+        if (rectOverlap(ghostBounds, topPipe) || rectOverlap(ghostBounds, bottomPipe)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    function checkJetpackCollection(ghostBounds, jetpacks) {
+      for (const jetpack of jetpacks) {
+        if (rectOverlap(ghostBounds, jetpack)) {
+          return jetpack;
+        }
+      }
+      return null;
+    }
+
+    // Score System
+    const scoreSystem = (() => {
+      let score = 0;
+      let highScore = 0;
+
+      function reset() {
+        score = 0;
+      }
+
+      function update(ghostBounds, pipes, multiplier = 1) {
+        for (const pipe of pipes) {
+          if (!pipe.scored && ghostBounds.x > pipe.x + CONFIG.PIPE_WIDTH) {
+            pipe.scored = true;
+            score += multiplier;
+            if (score > highScore) {
+              highScore = score;
+            }
+            // Increment pipes passed count for jetpack spawning
+            pipeManager.incrementPipesPassedCount();
+          }
+        }
+      }
+
+      function getScore() {
+        return score;
+      }
+
+      function getHighScore() {
+        return highScore;
+      }
+
+      function render(ctx) {
+        const barY = CONFIG.CANVAS_HEIGHT - CONFIG.SCORE_BAR_HEIGHT;
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 18px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(
+          `Score: ${score} | High: ${highScore}`,
+          CONFIG.CANVAS_WIDTH / 2,
+          barY + CONFIG.SCORE_BAR_HEIGHT / 2
+        );
+      }
+
+      return { reset, update, getScore, getHighScore, render };
+    })();
+
+    // Audio System
+    const audioSystem = (() => {
+      function play(key) {
+        try {
+          const audio = assetLoader.getAudio(key);
+          if (!audio) return;
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        } catch (e) {}
+      }
+
+      function playLoop(key) {
+        try {
+          const audio = assetLoader.getAudio(key);
+          if (!audio) return;
+          audio.loop = true;
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        } catch (e) {}
+      }
+
+      function stop(key) {
+        try {
+          const audio = assetLoader.getAudio(key);
+          if (!audio) return;
+          audio.pause();
+          audio.currentTime = 0;
+          audio.loop = false;
+        } catch (e) {}
+      }
+
+      function stopAll() {
+        try {
+          const allKeys = ['jump', 'gameOver', 'jetpackCollect', 'accelerationMusic'];
+          for (const key of allKeys) {
+            const audio = assetLoader.getAudio(key);
+            if (audio) {
+              audio.pause();
+              audio.currentTime = 0;
+              audio.loop = false;
+            }
+          }
+        } catch (e) {}
+      }
+
+      return { play, playLoop, stop, stopAll };
+    })();
+
+    // Renderer
+    const renderer = (() => {
+      // Static cloud definitions (fixed positions in upper portion of canvas)
+      const CLOUDS = [
+        { x: 60,  y: 60,  width: 100, height: 36 },
+        { x: 240, y: 100, width: 120, height: 40 },
+        { x: 380, y: 50,  width: 90,  height: 32 },
+        { x: 150, y: 150, width: 80,  height: 28 },
+      ];
+
+      // Seeded random lines for sketch texture (pre-computed so they're stable each frame)
+      const SKETCH_LINES = (() => {
+        const lines = [];
+        // Simple LCG for deterministic "random" positions
+        let seed = 42;
+        function rand() {
+          seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+          return (seed >>> 0) / 0xffffffff;
+        }
+        for (let i = 0; i < 25; i++) {
+          const x = rand() * CONFIG.CANVAS_WIDTH;
+          const y = rand() * (CONFIG.CANVAS_HEIGHT - CONFIG.SCORE_BAR_HEIGHT);
+          const len = 8 + rand() * 18;
+          const angle = rand() * Math.PI;
+          lines.push({ x, y, len, angle });
+        }
+        return lines;
+      })();
+
+      function drawBackground(ctx) {
+        // Solid background fill
+        ctx.fillStyle = CONFIG.BG_COLOR;
+        ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+        // Sketch / hand-drawn texture: short random lines at low opacity
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0,0,0,0.05)';
+        ctx.lineWidth = 1;
+        for (const { x, y, len, angle } of SKETCH_LINES) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + Math.cos(angle) * len, y + Math.sin(angle) * len);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      function drawRoundedRect(ctx, x, y, width, height, radius) {
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.lineTo(x + width - radius, y);
+        ctx.arc(x + width - radius, y + radius, radius, -Math.PI / 2, 0);
+        ctx.lineTo(x + width, y + height - radius);
+        ctx.arc(x + width - radius, y + height - radius, radius, 0, Math.PI / 2);
+        ctx.lineTo(x + radius, y + height);
+        ctx.arc(x + radius, y + height - radius, radius, Math.PI / 2, Math.PI);
+        ctx.lineTo(x, y + radius);
+        ctx.arc(x + radius, y + radius, radius, Math.PI, -Math.PI / 2);
+        ctx.closePath();
+      }
+
+      function drawClouds(ctx) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        for (const { x, y, width, height } of CLOUDS) {
+          const radius = height / 2;
+          drawRoundedRect(ctx, x, y, width, height, radius);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function drawScoreBar(ctx) {
+        ctx.fillStyle = CONFIG.SCORE_BAR_COLOR;
+        ctx.fillRect(
+          0,
+          CONFIG.CANVAS_HEIGHT - CONFIG.SCORE_BAR_HEIGHT,
+          CONFIG.CANVAS_WIDTH,
+          CONFIG.SCORE_BAR_HEIGHT
+        );
+      }
+
+      function drawWaitingScreen(ctx) {
+        const cx = CONFIG.CANVAS_WIDTH / 2;
+
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // Title
+        ctx.font = 'bold 48px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'rgba(0,0,0,0.4)';
+        ctx.shadowBlur = 6;
+        ctx.fillText('Flappy Kiro', cx, CONFIG.CANVAS_HEIGHT / 2 - 60);
+
+        // Hint
+        ctx.font = '18px monospace';
+        ctx.fillStyle = '#ffffffcc';
+        ctx.shadowBlur = 3;
+        ctx.fillText('Press SPACE or Click to Start', cx, CONFIG.CANVAS_HEIGHT / 2 + 10);
+
+        ctx.restore();
+      }
+
+      function drawGameOverScreen(ctx, score, highScore) {
+        const cx = CONFIG.CANVAS_WIDTH / 2;
+        const cy = CONFIG.CANVAS_HEIGHT / 2;
+
+        // Semi-transparent overlay
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT - CONFIG.SCORE_BAR_HEIGHT);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // "GAME OVER"
+        ctx.font = 'bold 52px monospace';
+        ctx.fillStyle = '#ff4444';
+        ctx.shadowColor = 'rgba(0,0,0,0.6)';
+        ctx.shadowBlur = 8;
+        ctx.fillText('GAME OVER', cx, cy - 70);
+
+        // Final score
+        ctx.font = 'bold 28px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowBlur = 4;
+        ctx.fillText(`Score: ${score}`, cx, cy - 10);
+
+        // High score
+        ctx.font = '20px monospace';
+        ctx.fillStyle = '#ffdd57';
+        ctx.fillText(`Best: ${highScore}`, cx, cy + 30);
+
+        // Restart hint
+        ctx.font = '16px monospace';
+        ctx.fillStyle = 'rgba(255,255,255,0.8)';
+        ctx.shadowBlur = 2;
+        ctx.fillText('Press SPACE or Click to Restart', cx, cy + 80);
+
+        ctx.restore();
+      }
+
+      return { drawBackground, drawClouds, drawScoreBar, drawWaitingScreen, drawGameOverScreen };
+    })();
+
+    // Input Handler
+    function handleInput() {
+      const state = gameState.getState();
+      if (state === STATES.WAITING) {
+        gameState.setState(STATES.PLAYING);
+        ghost.jump();
+        audioSystem.play('jump');
+      } else if (state === STATES.PLAYING) {
+        ghost.jump();
+        audioSystem.play('jump');
+      } else if (state === STATES.GAME_OVER) {
+        audioSystem.stopAll();
+        ghost.reset();
+        pipeManager.reset();
+        jetpackManager.reset();
+        scoreSystem.reset();
+        gameState.reset();
+        gameState.setState(STATES.PLAYING);
+        ghost.jump();
+        audioSystem.play('jump');
+      }
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleInput();
+      }
+    });
+    canvas.addEventListener('click', handleInput);
+
+    // Game Loop
+    let lastTime = 0;
+    function gameLoop(timestamp) {
+      const dt = lastTime ? timestamp - lastTime : 0;
+      lastTime = timestamp;
+
+      if (gameState.getState() === STATES.PLAYING) {
+        // Update acceleration state
+        gameState.updateAcceleration(dt);
+        
+        // Get current speed multiplier
+        const speedMultiplier = gameState.isAccelerating ? CONFIG.ACCELERATION_SPEED_MULTIPLIER : 1;
+        
+        // Update game objects
+        ghost.update();
+        pipeManager.update(dt, speedMultiplier);
+        jetpackManager.update(dt, speedMultiplier, pipeManager.getPipesPassedCount());
+        
+        const bounds = ghost.getBounds();
+        
+        // Check jetpack collection
+        const collectedJetpack = checkJetpackCollection(bounds, jetpackManager.getJetpacks());
+        if (collectedJetpack) {
+          jetpackManager.removeJetpack(collectedJetpack);
+          gameState.startAcceleration();
+          audioSystem.play('jetpackCollect');
+        }
+        
+        // Check collision (with invincibility during acceleration)
+        const isInvincible = gameState.isAccelerating;
+        if (checkCollision(bounds, pipeManager.getPipes(), CONFIG.CANVAS_HEIGHT, isInvincible)) {
+          gameState.setState(STATES.GAME_OVER);
+          audioSystem.play('gameOver');
+        } else {
+          // Update score with multiplier
+          const scoreMultiplier = gameState.getScoreMultiplier();
+          scoreSystem.update(bounds, pipeManager.getPipes(), scoreMultiplier);
+        }
+      }
+
+      // Render
+      renderer.drawBackground(ctx);
+      renderer.drawClouds(ctx);
+      pipeManager.render(ctx);
+      jetpackManager.render(ctx, Date.now());
+      ghost.render(ctx);
+      renderer.drawScoreBar(ctx);
+      scoreSystem.render(ctx);
+
+      if (gameState.getState() === STATES.WAITING) {
+        renderer.drawWaitingScreen(ctx);
+      } else if (gameState.getState() === STATES.GAME_OVER) {
+        renderer.drawGameOverScreen(ctx, scoreSystem.getScore(), scoreSystem.getHighScore());
+      }
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    // Bootstrap: load assets then start game loop
+    assetLoader.loadAll(() => {
+      ghost.reset();
+      pipeManager.reset();
+      jetpackManager.reset();
+      scoreSystem.reset();
+      gameState.setState(STATES.WAITING);
+      requestAnimationFrame(gameLoop);
+    });
+  </script>
+</body>
+</html>
